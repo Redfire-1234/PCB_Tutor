@@ -1,0 +1,108 @@
+!pip install -q transformers sentence-transformers faiss-cpu pymupdf accelerate
+
+from huggingface_hub import hf_hub_download
+import fitz
+import pickle
+import faiss
+from sentence_transformers import SentenceTransformer
+import numpy as np
+
+# 1. DOWNLOAD THREE PDFS
+# -----------------------------
+biology_path = hf_hub_download(
+    repo_id="Redfire-1234/PCB",
+    filename="class-12-pcb/class-12-biology.pdf",
+    repo_type="dataset"
+)
+
+chemistry_path = hf_hub_download(
+    repo_id="Redfire-1234/PCB",
+    filename="class-12-pcb/class-12-chemistry.pdf",
+    repo_type="dataset"
+)
+
+physics_path = hf_hub_download(
+    repo_id="Redfire-1234/PCB",
+    filename="class-12-pcb/class-12-physics.pdf",
+    repo_type="dataset"
+)
+
+# 2. EXTRACT TEXT
+# -----------------------------
+def extract_text(pdf_path):
+    doc = fitz.open(pdf_path)
+    text = ""
+    for page in doc:
+        text += page.get_text()
+    return text
+
+bio_text = extract_text(biology_path)
+chem_text = extract_text(chemistry_path)
+phy_text = extract_text(physics_path)
+
+# 3. CHUNK TEXT SUBJECT-WISE
+# -----------------------------
+def chunk_text(text, chunk_size=500, overlap=50):
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunks.append(text[start:end])
+        start = end - overlap
+    return chunks
+
+bio_chunks = chunk_text(bio_text)
+chem_chunks = chunk_text(chem_text)
+phy_chunks = chunk_text(phy_text)
+
+# 4. SAVE SUBJECT-WISE CHUNKS
+# -----------------------------
+with open("bio_chunks.pkl", "wb") as f:
+    pickle.dump(bio_chunks, f)
+
+with open("chem_chunks.pkl", "wb") as f:
+    pickle.dump(chem_chunks, f)
+
+with open("phy_chunks.pkl", "wb") as f:
+    pickle.dump(phy_chunks, f)
+
+print("Saved bio_chunks.pkl, chem_chunks.pkl, phy_chunks.pkl")
+
+# 5. BUILD SEPARATE EMBEDDING INDEX FOR EACH SUBJECT
+# -----------------------------
+embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+def build_faiss(chunks, output_name):
+    if len(chunks) == 0:
+        print(f"[WARN] No chunks found for {output_name}. Skipping...")
+        return
+    print(f"Encoding {len(chunks)} chunks for {output_name}...")
+    embeddings = embed_model.encode(chunks, convert_to_numpy=True)
+
+    dim = embeddings.shape[1]
+    index = faiss.IndexFlatL2(dim)
+    index.add(embeddings.astype("float32"))
+
+    faiss.write_index(index, output_name)
+    print(f"Saved {output_name}")
+
+# Build 3 indexes
+build_faiss(bio_chunks, "faiss_bio.bin")
+build_faiss(chem_chunks, "faiss_chem.bin")
+build_faiss(phy_chunks, "faiss_phy.bin")
+
+print("All subject-wise FAISS indexes built successfully!")
+
+from google.colab import files
+
+# Download Biology files
+files.download("bio_chunks.pkl")
+files.download("faiss_bio.bin")
+
+# Download Chemistry files
+files.download("chem_chunks.pkl")
+files.download("faiss_chem.bin")
+
+# Download Physics files
+files.download("phy_chunks.pkl")
+files.download("faiss_phy.bin")
