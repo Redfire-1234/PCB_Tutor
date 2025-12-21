@@ -2,20 +2,72 @@ import pickle
 import faiss
 from flask import Flask, request, jsonify, render_template_string
 from sentence_transformers import SentenceTransformer
-from transformers import AutoTokenizer, AutoModelForCausalLM
 from huggingface_hub import hf_hub_download
-import torch
+import hashlib
+import re
 import os
+import sys
+
+# Import Groq
+try:
+    from groq import Groq
+    GROQ_AVAILABLE = True
+except ImportError:
+    print("❌ ERROR: groq package not installed!")
+    print("Add 'groq' to requirements.txt")
+    GROQ_AVAILABLE = False
+    sys.exit(1)
 
 app = Flask(__name__)
 
 print("=" * 50)
-print("Loading models and data...")
+print("STARTING MCQ GENERATOR APP")
 print("=" * 50)
+
+# ------------------------------
+# Initialize Groq API Client
+# ------------------------------
+print("\nStep 1: Checking Groq API Key...")
+print("-" * 50)
+
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
+
+if not GROQ_API_KEY:
+    print("❌ GROQ_API_KEY not found!")
+    print("\nTo fix this:")
+    print("1. Go to: https://console.groq.com/keys")
+    print("2. Create a free API key")
+    print("3. In HuggingFace Space Settings → Repository secrets")
+    print("   Add: Name=GROQ_API_KEY, Value=<your-key>")
+    print("4. Restart your Space")
+    groq_client = None
+else:
+    print(f"✓ GROQ_API_KEY found ({len(GROQ_API_KEY)} chars)")
+    print(f"  First 20 chars: {GROQ_API_KEY[:20]}...")
+    
+    try:
+        groq_client = Groq(api_key=GROQ_API_KEY)
+        
+        # Test the API
+        print("  Testing API connection...")
+        test = groq_client.chat.completions.create(
+            messages=[{"role": "user", "content": "test"}],
+            model="llama-3.3-70b-versatile",
+            max_tokens=5
+        )
+        print("✓ Groq API working!")
+        
+    except Exception as e:
+        print(f"❌ Groq API initialization failed:")
+        print(f"   Error: {str(e)}")
+        groq_client = None
+
+print("-" * 50)
 
 # ------------------------------
 # Load embedding model (CPU)
 # ------------------------------
+print("\nStep 2: Loading embedding model...")
 embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 print("✓ Embedding model loaded")
 
@@ -24,21 +76,26 @@ print("✓ Embedding model loaded")
 # ------------------------------
 REPO_ID = "Redfire-1234/pcb_tutor"
 
-print("Downloading subject files from Hugging Face...")
+print("\nStep 3: Downloading subject files...")
+print("-" * 50)
 
-# Download Biology files
-bio_chunks_path = hf_hub_download(repo_id=REPO_ID, filename="bio_chunks.pkl", repo_type="model")
-faiss_bio_path = hf_hub_download(repo_id=REPO_ID, filename="faiss_bio.bin", repo_type="model")
-
-# Download Chemistry files
-chem_chunks_path = hf_hub_download(repo_id=REPO_ID, filename="chem_chunks.pkl", repo_type="model")
-faiss_chem_path = hf_hub_download(repo_id=REPO_ID, filename="faiss_chem.bin", repo_type="model")
-
-# Download Physics files
-phy_chunks_path = hf_hub_download(repo_id=REPO_ID, filename="phy_chunks.pkl", repo_type="model")
-faiss_phy_path = hf_hub_download(repo_id=REPO_ID, filename="faiss_phy.bin", repo_type="model")
+try:
+    bio_chunks_path = hf_hub_download(repo_id=REPO_ID, filename="bio_chunks.pkl", repo_type="model")
+    faiss_bio_path = hf_hub_download(repo_id=REPO_ID, filename="faiss_bio.bin", repo_type="model")
+    
+    chem_chunks_path = hf_hub_download(repo_id=REPO_ID, filename="chem_chunks.pkl", repo_type="model")
+    faiss_chem_path = hf_hub_download(repo_id=REPO_ID, filename="faiss_chem.bin", repo_type="model")
+    
+    phy_chunks_path = hf_hub_download(repo_id=REPO_ID, filename="phy_chunks.pkl", repo_type="model")
+    faiss_phy_path = hf_hub_download(repo_id=REPO_ID, filename="faiss_phy.bin", repo_type="model")
+    
+    print("✓ All files downloaded")
+except Exception as e:
+    print(f"❌ Error downloading files: {e}")
+    sys.exit(1)
 
 # Load all subjects into memory
+print("\nStep 4: Loading subject data into memory...")
 SUBJECTS = {
     "biology": {
         "chunks": pickle.load(open(bio_chunks_path, "rb")),
@@ -54,29 +111,30 @@ SUBJECTS = {
     }
 }
 
-print(f"✓ Biology: {len(SUBJECTS['biology']['chunks'])} chunks loaded")
-print(f"✓ Chemistry: {len(SUBJECTS['chemistry']['chunks'])} chunks loaded")
-print(f"✓ Physics: {len(SUBJECTS['physics']['chunks'])} chunks loaded")
+print(f"✓ Biology: {len(SUBJECTS['biology']['chunks'])} chunks")
+print(f"✓ Chemistry: {len(SUBJECTS['chemistry']['chunks'])} chunks")
+print(f"✓ Physics: {len(SUBJECTS['physics']['chunks'])} chunks")
+
+print("\n" + "=" * 50)
+print("✓ ALL SYSTEMS READY!")
+print("=" * 50 + "\n")
 
 # ------------------------------
-# Load LLM model (CPU)
+# Caching
 # ------------------------------
-model_name = "Qwen/Qwen2.5-1.5B-Instruct"
-print(f"Loading LLM: {model_name}")
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-device = "cpu"
-model = AutoModelForCausalLM.from_pretrained(
-    model_name,
-    torch_dtype=torch.float32
-).to(device)
-print(f"✓ LLM loaded on {device}")
+MCQ_CACHE = {}
+MAX_CACHE_SIZE = 100
 
-print("=" * 50)
-print("All models loaded successfully!")
-print("=" * 50)
+def get_cache_key(topic, subject, context_hash):
+    return f"{subject}:{topic}:{context_hash}"
+
+def cache_mcq(key, mcqs):
+    if len(MCQ_CACHE) >= MAX_CACHE_SIZE:
+        MCQ_CACHE.pop(next(iter(MCQ_CACHE)))
+    MCQ_CACHE[key] = mcqs
 
 # ------------------------------
-# RAG Search in specific subject
+# RAG Search
 # ------------------------------
 def rag_search(query, subject, k=5):
     if subject not in SUBJECTS:
@@ -85,10 +143,9 @@ def rag_search(query, subject, k=5):
     chunks = SUBJECTS[subject]["chunks"]
     index = SUBJECTS[subject]["index"]
     
-    q_emb = embed_model.encode([query]).astype("float32")
+    q_emb = embed_model.encode([query], show_progress_bar=False).astype("float32")
     D, I = index.search(q_emb, k)
     
-    # Get the actual chunks
     results = []
     for idx in I[0]:
         if idx < len(chunks):
@@ -97,54 +154,108 @@ def rag_search(query, subject, k=5):
     return "\n\n".join(results)
 
 # ------------------------------
-# MCQ Generation with Step-by-Step Answer Selection
+# MCQ Generation
 # ------------------------------
 def generate_mcqs(context, topic, subject):
-    prompt = f"""You are a Class-12 {subject.title()} teacher creating MCQs for students.
+    # Check if Groq is available
+    if not groq_client:
+        error_msg = """ERROR: Groq API not initialized!
+Please check:
+1. GROQ_API_KEY is set in Space Settings → Repository secrets
+2. API key is valid (get one from https://console.groq.com/keys)
+3. Space has been restarted after adding the key
+Current status: API key not found or invalid."""
+        return error_msg
+    
+    # Check cache
+    context_hash = hashlib.md5(context.encode()).hexdigest()[:8]
+    cache_key = get_cache_key(topic, subject, context_hash)
+    
+    if cache_key in MCQ_CACHE:
+        print("✓ Using cached MCQs")
+        return MCQ_CACHE[cache_key]
+    
+    print(f"🤖 Generating MCQs for {subject} - {topic}")
+    
+    prompt = f"""You are a Class-12 {subject.title()} teacher creating MCQs.
 Topic: "{topic}"
-Context from textbook:
-{context}
-TASK: Generate exactly 5 MCQs. For each MCQ:
-1. Write a clear question
-2. Create 4 options (A, B, C, D)
-3. THINK CAREFULLY: Which option is correct according to the context?
-4. Mark the correct answer
-FORMAT (follow exactly):
-Q1. [Your question here]
-A) [First option]
-B) [Second option]
-C) [Third option]
-D) [Fourth option]
-Correct Answer: [Letter] - [Brief reason why this is correct]
-IMPORTANT RULES:
-✓ The correct answer MUST be supported by the context above
-✓ Read all options carefully before selecting
-✓ Do not guess - verify each answer from the context
-✓ Make distractors (wrong options) realistic but clearly incorrect
+Reference material from textbook:
+{context[:1500]}
+Generate exactly 5 multiple-choice questions based on the reference material.
+FORMAT (follow EXACTLY):
+Q1. [Question based on material]
+A) [Option 1]
+B) [Option 2]
+C) [Option 3]
+D) [Option 4]
+Answer: [A/B/C/D] - [Brief explanation]
+Q2. [Question based on material]
+A) [Option 1]
+B) [Option 2]
+C) [Option 3]
+D) [Option 4]
+Answer: [A/B/C/D] - [Brief explanation]
+Continue for Q3, Q4, Q5.
+REQUIREMENTS:
+- All questions must be answerable from the reference material
+- All 4 options should be plausible
+- Correct answer must be clearly supported by material
+- Keep explanations brief (1-2 sentences)
 Generate 5 MCQs now:"""
     
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048).to(device)
-    outputs = model.generate(
-        **inputs,
-        max_new_tokens=900,
-        temperature=0.15,  # Very low temperature for accuracy
-        top_p=0.8,
-        do_sample=True,
-        repetition_penalty=1.15
-    )
-    result = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    
-    # Extract only the generated MCQs
-    if "Generate 5 MCQs now:" in result:
-        result = result.split("Generate 5 MCQs now:")[-1].strip()
-    
-    return result
+    try:
+        chat_completion = groq_client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert Class-12 teacher who creates high-quality MCQs from textbook content. You always follow the exact format specified."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            model="llama-3.3-70b-versatile",
+            temperature=0.3,
+            max_tokens=1500,
+            top_p=0.9
+        )
+        
+        result = chat_completion.choices[0].message.content.strip()
+        result = clean_mcq_output(result)
+        
+        cache_mcq(cache_key, result)
+        
+        print("✓ MCQs generated successfully")
+        return result
+        
+    except Exception as e:
+        error_msg = f"""Error calling Groq API: {str(e)}
+Possible causes:
+1. Rate limit exceeded (wait a moment)
+2. Invalid API key
+3. Network issue
+Please try again in a few seconds."""
+        print(f"❌ Groq API Error: {e}")
+        return error_msg
 
-def verify_and_correct_answers(mcqs_text, context):
-    """
-    This function is kept for future enhancements
-    """
-    return mcqs_text
+def clean_mcq_output(text):
+    lines = text.split('\n')
+    cleaned_lines = []
+    
+    for line in lines:
+        line = line.strip()
+        
+        if (re.match(r'^Q\d+\.', line) or 
+            line.startswith(('A)', 'B)', 'C)', 'D)', 'Answer:', 'Correct Answer:')) or
+            not line):
+            
+            if line.startswith('Correct Answer:'):
+                line = line.replace('Correct Answer:', 'Answer:')
+            
+            cleaned_lines.append(line)
+    
+    return '\n'.join(cleaned_lines)
 
 # ------------------------------
 # HTML UI
@@ -178,9 +289,7 @@ HTML_TEMPLATE = """
         }
         .header h1 { font-size: 2.5em; margin-bottom: 10px; }
         .content { padding: 40px; }
-        .form-group {
-            margin-bottom: 25px;
-        }
+        .form-group { margin-bottom: 25px; }
         label {
             display: block;
             font-weight: 600;
@@ -274,13 +383,24 @@ HTML_TEMPLATE = """
         .bio { background: #d4edda; color: #155724; }
         .chem { background: #d1ecf1; color: #0c5460; }
         .phy { background: #f8d7da; color: #721c24; }
+        .api-badge {
+            background: #17a2b8;
+            color: white;
+            padding: 5px 12px;
+            border-radius: 15px;
+            font-size: 12px;
+            margin-left: 10px;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
             <h1>🎓 Class 12 PCB MCQ Generator</h1>
-            <p style="font-size: 1.1em; margin-bottom: 15px;">Generate practice MCQs from your textbooks</p>
+            <p style="font-size: 1.1em; margin-bottom: 15px;">
+                Generate practice MCQs from your textbooks 
+                <span class="api-badge">⚡ Llama 3.3 70B</span>
+            </p>
             <div>
                 <span class="subject-tag bio">Biology</span>
                 <span class="subject-tag chem">Chemistry</span>
@@ -307,13 +427,14 @@ HTML_TEMPLATE = """
             
             <div class="loading" id="loading">
                 <div class="spinner"></div>
-                <p style="color: #666; font-size: 16px;">Generating MCQs... This may take 30-60 seconds</p>
+                <p style="color: #666; font-size: 16px;">Generating MCQs with AI...</p>
+                <p style="color: #999; font-size: 13px; margin-top: 10px;">⚡ Usually takes 5-10 seconds</p>
             </div>
             
             <div class="result" id="result">
                 <h3>📝 Generated MCQs:</h3>
-                <div style="background: #fff3cd; padding: 12px; border-radius: 6px; margin-bottom: 15px; color: #856404; font-size: 14px;">
-                    ⚠️ <strong>Note:</strong> AI-generated answers may occasionally be incorrect. Please verify answers using your textbook.
+                <div style="background: #d4edda; padding: 12px; border-radius: 6px; margin-bottom: 15px; color: #155724; font-size: 14px;">
+                    ✓ <strong>High Quality:</strong> Generated by Llama 3.3 70B via Groq API
                 </div>
                 <div class="mcq-content" id="mcqContent"></div>
             </div>
@@ -363,7 +484,6 @@ HTML_TEMPLATE = """
             }
         }
         
-        // Allow Enter key to submit
         document.getElementById('topic').addEventListener('keypress', function(e) {
             if (e.key === 'Enter') {
                 generateMCQs();
@@ -392,28 +512,23 @@ def generate():
             return jsonify({"error": "Topic is required"}), 400
         
         if subject not in SUBJECTS:
-            return jsonify({"error": "Invalid subject. Choose biology, chemistry, or physics."}), 400
+            return jsonify({"error": "Invalid subject"}), 400
         
-        print(f"\n🔍 Searching {subject} for topic: {topic}")
+        print(f"\n🔍 Searching {subject} for: {topic}")
         
-        # Retrieve context from RAG
         context = rag_search(topic, subject, k=5)
         
         if not context or len(context.strip()) < 50:
-            return jsonify({"error": f"No relevant content found in {subject} for topic: {topic}"}), 404
+            return jsonify({"error": f"No content found for: {topic}"}), 404
         
-        print(f"✓ Found context ({len(context)} chars)")
+        print(f"✓ Context found ({len(context)} chars)")
         
-        # Generate MCQs
-        print("🤖 Generating MCQs...")
         mcqs = generate_mcqs(context, topic, subject)
-        
-        print("✓ MCQs generated successfully")
         
         return jsonify({"mcqs": mcqs, "subject": subject})
     
     except Exception as e:
-        print(f"❌ Error in /generate: {e}")
+        print(f"❌ Error: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -422,17 +537,14 @@ def generate():
 def health():
     return jsonify({
         "status": "healthy",
-        "subjects": {
-            "biology": len(SUBJECTS["biology"]["chunks"]),
-            "chemistry": len(SUBJECTS["chemistry"]["chunks"]),
-            "physics": len(SUBJECTS["physics"]["chunks"])
-        }
+        "groq_available": groq_client is not None,
+        "cache_size": len(MCQ_CACHE)
     })
 
 # ------------------------------
-# Run the App
+# Run
 # ------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
-    print(f"\n🚀 Starting Flask on 0.0.0.0:{port}\n")
+    print(f"\n🚀 Starting server on port {port}...\n")
     app.run(host="0.0.0.0", port=port, debug=False)
