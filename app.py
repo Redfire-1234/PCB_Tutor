@@ -25,6 +25,65 @@ print("STARTING MCQ GENERATOR APP")
 print("=" * 50)
 
 # ------------------------------
+# Chapter Names (Actual Textbook Chapters)
+# ------------------------------
+CHAPTER_NAMES = {
+    "biology": [
+        "Reproduction in Lower and Higher Plants",
+        "Reproduction in Lower and Higher Animals",
+        "Inheritance and Variation",
+        "Molecular Basis of Inheritance",
+        "Origin and Evolution of Life",
+        "Plant Water Relation",
+        "Plant Growth and Mineral Nutrition",
+        "Respiration and Circulation",
+        "Control and Co-ordination",
+        "Human Health and Diseases",
+        "Enhancement of Food Production",
+        "Biotechnology",
+        "Organisms and Populations",
+        "Ecosystems and Energy Flow",
+        "Biodiversity, Conservation and Environmental Issues"
+    ],
+    "chemistry": [
+        "Solid State",
+        "Solutions",
+        "Ionic Equilibria",
+        "Chemical Thermodynamics",
+        "Electrochemistry",
+        "Chemical Kinetics",
+        "Elements of Groups 16, 17 and 18",
+        "Transition and Inner transition Elements",
+        "Coordination Compounds",
+        "Halogen Derivatives",
+        "Alcohols, Phenols and Ethers",
+        "Aldehydes, Ketones and Carboxylic acids",
+        "Amines",
+        "Biomolecules",
+        "Introduction to Polymer Chemistry",
+        "Green Chemistry and Nanochemistry"
+    ],
+    "physics": [
+        "Rotational Dynamics",
+        "Mechanical Properties of Fluids",
+        "Kinetic Theory of Gases and Radiation",
+        "Thermodynamics",
+        "Oscillations",
+        "Superposition of Waves",
+        "Wave Optics",
+        "Electrostatics",
+        "Current Electricity",
+        "Magnetic Fields due to Electric Current",
+        "Magnetic Materials",
+        "Electromagnetic induction",
+        "AC Circuits",
+        "Dual Nature of Radiation and Matter",
+        "Structure of Atoms and Nuclei",
+        "Semiconductor Devices"
+    ]
+}
+
+# ------------------------------
 # Initialize Groq API Client
 # ------------------------------
 print("\nStep 1: Checking Groq API Key...")
@@ -154,9 +213,164 @@ def rag_search(query, subject, k=5):
     return "\n\n".join(results)
 
 # ------------------------------
+# Topic Validation (Check if topic belongs to subject)
+# ------------------------------
+def validate_topic_subject(topic, subject):
+    """
+    Validate if the topic belongs to the selected subject using LLM
+    Returns True if valid, False otherwise
+    """
+    if not groq_client:
+        return True  # Skip validation if API not available
+    
+    validation_prompt = f"""You are a Class 12 PCB subject expert. Determine if the following topic belongs to {subject.title()}.
+Topic: "{topic}"
+Subject: {subject.title()}
+Class 12 {subject.title()} covers:
+{"- Reproduction, Genetics, Evolution, Plant Physiology, Human Systems, Ecology, Biotechnology" if subject == "biology" else ""}
+{"- Solid State, Solutions, Thermodynamics, Electrochemistry, Organic Chemistry, Coordination Compounds" if subject == "chemistry" else ""}
+{"- Rotational Dynamics, Fluids, Thermodynamics, Waves, Optics, Electromagnetism, Modern Physics, Semiconductors" if subject == "physics" else ""}
+Answer ONLY with "YES" if the topic belongs to {subject.title()}, or "NO" if it belongs to a different subject.
+Answer:"""
+    
+    try:
+        response = groq_client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": f"You are an expert at identifying which subject a topic belongs to. Answer only YES or NO."
+                },
+                {
+                    "role": "user",
+                    "content": validation_prompt
+                }
+            ],
+            model="llama-3.3-70b-versatile",
+            temperature=0.1,
+            max_tokens=10
+        )
+        
+        result = response.choices[0].message.content.strip().upper()
+        
+        if "YES" in result:
+            print(f"✓ Topic '{topic}' validated for {subject}")
+            return True
+        else:
+            print(f"❌ Topic '{topic}' does NOT belong to {subject}")
+            return False
+            
+    except Exception as e:
+        print(f"⚠️ Validation failed: {e}")
+        return True  # Allow on error to avoid blocking
+
+# ------------------------------
+# Chapter Detection (Using Actual Chapter Names)
+# ------------------------------
+def detect_chapter_from_list(context, topic, subject):
+    """
+    Detect chapter using the actual chapter list by matching keywords
+    Returns None if topic doesn't match the subject
+    """
+    if subject not in CHAPTER_NAMES:
+        return None
+    
+    chapters = CHAPTER_NAMES[subject]
+    combined_text = (topic + " " + context[:1000]).lower()
+    
+    # Score each chapter based on keyword matching
+    scores = {}
+    for chapter in chapters:
+        score = 0
+        chapter_words = chapter.lower().split()
+        
+        # Check if chapter words appear in the content
+        for word in chapter_words:
+            if len(word) > 3:  # Ignore small words like "and", "the"
+                if word in combined_text:
+                    score += 1
+        
+        # Bonus if topic is similar to chapter name
+        topic_words = topic.lower().split()
+        for t_word in topic_words:
+            if len(t_word) > 3 and t_word in chapter.lower():
+                score += 2
+        
+        if score > 0:
+            scores[chapter] = score
+    
+    # Return chapter with highest score
+    if scores:
+        best_chapter = max(scores.items(), key=lambda x: x[1])[0]
+        print(f"✓ Matched chapter: {best_chapter} (score: {scores[best_chapter]})")
+        return best_chapter
+    
+    # Fallback: Use LLM to choose from the list
+    return detect_chapter_with_llm(context, topic, subject, chapters)
+
+def detect_chapter_with_llm(context, topic, subject, chapters):
+    """
+    Use LLM to pick the correct chapter from the provided list
+    Also verifies if the topic belongs to the subject
+    """
+    if not groq_client:
+        return None
+    
+    chapter_list = "\n".join([f"{i+1}. {ch}" for i, ch in enumerate(chapters)])
+    
+    detection_prompt = f"""Based on the following textbook content and topic, identify which chapter from the Class 12 {subject.title()} textbook this content belongs to.
+Topic: {topic}
+Content snippet:
+{context[:600]}
+Available {subject.title()} chapters:
+{chapter_list}
+IMPORTANT: If the topic and content do NOT belong to {subject.title()}, respond with "NOT_MATCHING".
+If it matches, respond with ONLY the chapter number and name exactly as listed (e.g., "5. Origin and Evolution of Life").
+Response:"""
+    
+    try:
+        response = groq_client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": f"You are an expert at identifying which chapter textbook content belongs to. You can recognize when content doesn't match the subject. If the topic is from a different subject than {subject.title()}, respond with 'NOT_MATCHING'."
+                },
+                {
+                    "role": "user",
+                    "content": detection_prompt
+                }
+            ],
+            model="llama-3.3-70b-versatile",
+            temperature=0.1,
+            max_tokens=50
+        )
+        
+        result = response.choices[0].message.content.strip()
+        
+        # Check if topic doesn't match the subject
+        if "NOT_MATCHING" in result.upper() or "NOT MATCHING" in result.upper():
+            print(f"⚠️ Topic '{topic}' doesn't belong to {subject}")
+            return None
+        
+        # Extract chapter name from response (remove number prefix if present)
+        chapter = re.sub(r'^\d+\.\s*', '', result).strip()
+        
+        # Verify it's in our list
+        for ch in chapters:
+            if ch.lower() in chapter.lower() or chapter.lower() in ch.lower():
+                print(f"✓ LLM detected chapter: {ch}")
+                return ch
+        
+        print(f"⚠️ LLM response not in list: {result}")
+        return None
+        
+    except Exception as e:
+        print(f"⚠️ Chapter detection failed: {e}")
+        return None
+
+# ------------------------------
 # MCQ Generation
 # ------------------------------
-def generate_mcqs(context, topic, subject):
+def generate_mcqs(context, topic, subject, num_questions=5):
     # Check if Groq is available
     if not groq_client:
         error_msg = """ERROR: Groq API not initialized!
@@ -165,23 +379,33 @@ Please check:
 2. API key is valid (get one from https://console.groq.com/keys)
 3. Space has been restarted after adding the key
 Current status: API key not found or invalid."""
-        return error_msg
+        return error_msg, None
     
     # Check cache
     context_hash = hashlib.md5(context.encode()).hexdigest()[:8]
-    cache_key = get_cache_key(topic, subject, context_hash)
+    cache_key = get_cache_key(topic, subject, context_hash) + f":{num_questions}"
     
     if cache_key in MCQ_CACHE:
         print("✓ Using cached MCQs")
-        return MCQ_CACHE[cache_key]
+        return MCQ_CACHE[cache_key]["mcqs"], MCQ_CACHE[cache_key]["chapter"]
     
-    print(f"🤖 Generating MCQs for {subject} - {topic}")
+    print(f"🤖 Generating {num_questions} MCQs for {subject} - {topic}")
+    
+    # Detect the chapter from our actual chapter list
+    chapter = detect_chapter_from_list(context, topic, subject)
+    
+    # If chapter is None, topic doesn't belong to this subject
+    if chapter is None:
+        error_msg = f"❌ The topic '{topic}' does not belong to {subject.title()}.\n\nPlease enter a topic related to {subject.title()} or select the correct subject."
+        print(f"⚠️ Topic mismatch: '{topic}' not in {subject}")
+        return error_msg, None
     
     prompt = f"""You are a Class-12 {subject.title()} teacher creating MCQs.
 Topic: "{topic}"
+Chapter: "{chapter}"
 Reference material from textbook:
 {context[:1500]}
-Generate exactly 5 multiple-choice questions based on the reference material.
+Generate exactly {num_questions} multiple-choice questions based on the reference material.
 FORMAT (follow EXACTLY):
 Q1. [Question based on material]
 A) [Option 1]
@@ -195,15 +419,18 @@ B) [Option 2]
 C) [Option 3]
 D) [Option 4]
 Answer: [A/B/C/D] - [Brief explanation]
-Continue for Q3, Q4, Q5.
+Continue for Q3, Q4, Q5{"..." if num_questions > 5 else ""}.
 REQUIREMENTS:
 - All questions must be answerable from the reference material
 - All 4 options should be plausible
 - Correct answer must be clearly supported by material
 - Keep explanations brief (1-2 sentences)
-Generate 5 MCQs now:"""
+Generate {num_questions} MCQs now:"""
     
     try:
+        # Adjust max_tokens based on number of questions
+        max_tokens = min(3000, 300 * num_questions)
+        
         chat_completion = groq_client.chat.completions.create(
             messages=[
                 {
@@ -217,17 +444,18 @@ Generate 5 MCQs now:"""
             ],
             model="llama-3.3-70b-versatile",
             temperature=0.3,
-            max_tokens=1500,
+            max_tokens=max_tokens,
             top_p=0.9
         )
         
         result = chat_completion.choices[0].message.content.strip()
         result = clean_mcq_output(result)
         
-        cache_mcq(cache_key, result)
+        # Cache both MCQs and chapter
+        cache_mcq(cache_key, {"mcqs": result, "chapter": chapter})
         
         print("✓ MCQs generated successfully")
-        return result
+        return result, chapter
         
     except Exception as e:
         error_msg = f"""Error calling Groq API: {str(e)}
@@ -237,7 +465,7 @@ Possible causes:
 3. Network issue
 Please try again in a few seconds."""
         print(f"❌ Groq API Error: {e}")
-        return error_msg
+        return error_msg, chapter
 
 def clean_mcq_output(text):
     lines = text.split('\n')
@@ -290,6 +518,24 @@ HTML_TEMPLATE = """
         .header h1 { font-size: 2.5em; margin-bottom: 10px; }
         .content { padding: 40px; }
         .form-group { margin-bottom: 25px; }
+        .form-row {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 25px;
+        }
+        .form-row .form-group {
+            margin-bottom: 0;
+        }
+        .form-row .form-group:first-child {
+            flex: 2;
+        }
+        .form-row .form-group:last-child {
+            flex: 0 0 120px;
+        }
+        .form-row .form-group:last-child select {
+            padding: 15px 10px;
+            font-size: 15px;
+        }
         label {
             display: block;
             font-weight: 600;
@@ -344,6 +590,27 @@ HTML_TEMPLATE = """
             color: #667eea;
             margin-bottom: 20px;
             font-size: 1.4em;
+        }
+        .chapter-info {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 16px;
+        }
+        .chapter-icon {
+            font-size: 24px;
+        }
+        .chapter-text {
+            flex: 1;
+        }
+        .chapter-name {
+            font-weight: 700;
+            font-size: 18px;
         }
         .mcq-content {
             background: white;
@@ -418,21 +685,58 @@ HTML_TEMPLATE = """
                 </select>
             </div>
             
-            <div class="form-group">
-                <label for="topic">✏️ Enter Topic</label>
-                <input type="text" id="topic" placeholder="e.g., Mitochondria, Chemical Bonding, Newton's Laws">
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="topic">✏️ Enter Topic</label>
+                    <input type="text" id="topic" placeholder="e.g., Mitochondria, Chemical Bonding, Newton's Laws">
+                </div>
+                
+                <div class="form-group">
+                    <label for="numQuestions">🔢 MCQs</label>
+                    <select id="numQuestions">
+                        <option value="1">1</option>
+                        <option value="2">2</option>
+                        <option value="3">3</option>
+                        <option value="4">4</option>
+                        <option value="5" selected>5</option>
+                        <option value="6">6</option>
+                        <option value="7">7</option>
+                        <option value="8">8</option>
+                        <option value="9">9</option>
+                        <option value="10">10</option>
+                        <option value="11">11</option>
+                        <option value="12">12</option>
+                        <option value="13">13</option>
+                        <option value="14">14</option>
+                        <option value="15">15</option>
+                        <option value="16">16</option>
+                        <option value="17">17</option>
+                        <option value="18">18</option>
+                        <option value="19">19</option>
+                        <option value="20">20</option>
+                    </select>
+                </div>
             </div>
             
-            <button onclick="generateMCQs()">🚀 Generate 5 MCQs</button>
+            <button onclick="generateMCQs()">🚀 Generate MCQs</button>
             
             <div class="loading" id="loading">
                 <div class="spinner"></div>
                 <p style="color: #666; font-size: 16px;">Generating MCQs with AI...</p>
-                <p style="color: #999; font-size: 13px; margin-top: 10px;">⚡ Usually takes 5-10 seconds</p>
+                <p style="color: #999; font-size: 13px; margin-top: 10px;">⚡ Detecting chapter from textbook...</p>
             </div>
             
             <div class="result" id="result">
                 <h3>📝 Generated MCQs:</h3>
+                
+                <div class="chapter-info" id="chapterInfo" style="display: none;">
+                    <span class="chapter-icon">📖</span>
+                    <div class="chapter-text">
+                        <div style="font-size: 13px; opacity: 0.9;">Chapter:</div>
+                        <div class="chapter-name" id="chapterName"></div>
+                    </div>
+                </div>
+                
                 <div style="background: #d4edda; padding: 12px; border-radius: 6px; margin-bottom: 15px; color: #155724; font-size: 14px;">
                     ✓ <strong>High Quality:</strong> Generated by Llama 3.3 70B via Groq API
                 </div>
@@ -444,6 +748,7 @@ HTML_TEMPLATE = """
         async function generateMCQs() {
             const subject = document.getElementById('subject').value;
             const topic = document.getElementById('topic').value.trim();
+            const numQuestions = parseInt(document.getElementById('numQuestions').value);
             
             if (!topic) {
                 alert('⚠️ Please enter a topic!');
@@ -453,9 +758,11 @@ HTML_TEMPLATE = """
             const loading = document.getElementById('loading');
             const result = document.getElementById('result');
             const btn = document.querySelector('button');
+            const chapterInfo = document.getElementById('chapterInfo');
             
             loading.classList.add('show');
             result.classList.remove('show');
+            chapterInfo.style.display = 'none';
             btn.disabled = true;
             btn.textContent = '⏳ Generating...';
             
@@ -463,7 +770,7 @@ HTML_TEMPLATE = """
                 const response = await fetch('/generate', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({subject, topic})
+                    body: JSON.stringify({subject, topic, num_questions: numQuestions})
                 });
                 
                 const data = await response.json();
@@ -473,6 +780,12 @@ HTML_TEMPLATE = """
                     return;
                 }
                 
+                // Display chapter info
+                if (data.chapter && data.chapter !== 'Unknown Chapter') {
+                    document.getElementById('chapterName').textContent = data.chapter;
+                    chapterInfo.style.display = 'flex';
+                }
+                
                 document.getElementById('mcqContent').textContent = data.mcqs;
                 result.classList.add('show');
             } catch (error) {
@@ -480,7 +793,7 @@ HTML_TEMPLATE = """
             } finally {
                 loading.classList.remove('show');
                 btn.disabled = false;
-                btn.textContent = '🚀 Generate 5 MCQs';
+                btn.textContent = '🚀 Generate MCQs';
             }
         }
         
@@ -493,7 +806,6 @@ HTML_TEMPLATE = """
 </body>
 </html>
 """
-
 # ------------------------------
 # Routes
 # ------------------------------
@@ -507,6 +819,15 @@ def generate():
         data = request.json
         subject = data.get("subject", "").lower()
         topic = data.get("topic", "")
+        num_questions = data.get("num_questions", 5)
+        
+        # Validate num_questions
+        try:
+            num_questions = int(num_questions)
+            if num_questions < 1 or num_questions > 20:
+                num_questions = 5
+        except:
+            num_questions = 5
         
         if not topic:
             return jsonify({"error": "Topic is required"}), 400
@@ -514,8 +835,22 @@ def generate():
         if subject not in SUBJECTS:
             return jsonify({"error": "Invalid subject"}), 400
         
-        print(f"\n🔍 Searching {subject} for: {topic}")
+        print(f"\n🔍 Validating topic for {subject}...")
         
+        # STEP 1: Validate if topic belongs to subject (BEFORE RAG search)
+        if not validate_topic_subject(topic, subject):
+            subject_names = {
+                "biology": "Biology",
+                "chemistry": "Chemistry", 
+                "physics": "Physics"
+            }
+            error_msg = f"The topic '{topic}' does not appear to be related to {subject_names[subject]}.\n\nPlease either:\n• Enter a {subject_names[subject]}-related topic, or\n• Select the correct subject for this topic"
+            return jsonify({"error": error_msg}), 400
+        
+        print(f"✓ Topic validated for {subject}")
+        print(f"🔍 Searching {subject} for: {topic}")
+        
+        # STEP 2: RAG search
         context = rag_search(topic, subject, k=5)
         
         if not context or len(context.strip()) < 50:
@@ -523,9 +858,18 @@ def generate():
         
         print(f"✓ Context found ({len(context)} chars)")
         
-        mcqs = generate_mcqs(context, topic, subject)
+        # STEP 3: Generate MCQs
+        mcqs, chapter = generate_mcqs(context, topic, subject, num_questions)
         
-        return jsonify({"mcqs": mcqs, "subject": subject})
+        # Check if there was a subject mismatch
+        if chapter is None:
+            return jsonify({"error": mcqs}), 400
+        
+        return jsonify({
+            "mcqs": mcqs, 
+            "subject": subject,
+            "chapter": chapter
+        })
     
     except Exception as e:
         print(f"❌ Error: {e}")
